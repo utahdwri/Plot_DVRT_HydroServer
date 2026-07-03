@@ -8,7 +8,7 @@ import os
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
-import plotly.graph_objects go
+import plotly.graph_objects as go
 
 # --- Configuration Constants ---
 BASE_URL = "https://hydroserver.waterrights.utah.gov/api/data"
@@ -72,24 +72,13 @@ def parse_url_options(url_or_query):
 
     parsed = urlparse(url_or_query)
     query_text = parsed.query or url_or_query.lstrip("?")
-    
-    # Strip custom /diff routing helper safely if it leaked into parsing
-    if "/diff" in query_text:
-        query_text = query_text.replace("/diff", "")
-
     values = parse_qs(query_text, keep_blank_values=False)
 
-    station_raw = first_present_value(
-        values.get("station_id", [None])[0],
-        values.get("STATION_ID", [None])[0],
-    )
-    
-    # Extract just the ID numbers if /diff is appended directly to the parameter
-    if station_raw and "/diff" in station_raw:
-        station_raw = station_raw.split("/diff")[0]
-
     return {
-        "station_id": station_raw,
+        "station_id": first_present_value(
+            values.get("station_id", [None])[0],
+            values.get("STATION_ID", [None])[0],
+        ),
         "start_date": first_present_value(
             values.get("start_date", [None])[0],
             values.get("start", [None])[0],
@@ -187,13 +176,10 @@ def build_csv_download_url(base_url, station_id, start_date=None, end_date=None)
     return f"{base_url.rstrip('/')}/download.csv?{build_plot_query(station_id, start_date, end_date)}"
 
 
-def build_diff_inline_url(base_url, station_id, start_date=None, end_date=None):
+def build_diff_download_url(base_url, station_id, start_date=None, end_date=None):
     if not base_url:
         return None
-    query = build_plot_query(station_id, start_date, end_date)
-    # Replaces 'station_id=XXXX' with 'station_id=XXXX/diff'
-    target_query = query.replace(f"station_id={station_id}", f"station_id={station_id}/diff")
-    return f"{base_url.rstrip('/')}/?{target_query}"
+    return f"{base_url.rstrip('/')}/diff.txt?{build_plot_query(station_id, start_date, end_date)}"
 
 
 def get_nested_value(data, path):
@@ -306,12 +292,12 @@ def get_dvrt_rows(station_id, start_date=None, end_date=None, start_datetime=Non
 
 
 def calculate_diff_counts(station_id, start_date=None, end_date=None):
+    """Calculates diff metrics efficiently to expose onto the plot summary string."""
     start_datetime = start_of_day(start_date)
     end_datetime = end_of_day(end_date)
     datastreams = get_daily_datastreams(station_id)
 
     hs_by_date = {}
-    hs_duplicate_days_count = 0
     if datastreams:
         latest_stream = max(
             datastreams,
@@ -322,17 +308,10 @@ def calculate_diff_counts(station_id, start_date=None, end_date=None):
             start_datetime=start_datetime,
             end_datetime=end_datetime,
         )
-        
-        hs_time_groups = {}
         for obs in observations:
             if "phenomenonTime" in obs and "result" in obs:
                 dt_str = datetime.fromisoformat(obs["phenomenonTime"].replace("Z", "+00:00")).date().isoformat()
-                hs_time_groups.setdefault(dt_str, []).append(round(float(obs["result"]), 6))
-        
-        for d, vals in hs_time_groups.items():
-            hs_by_date[d] = vals[0]
-            if len(vals) > 1:
-                hs_duplicate_days_count += 1
+                hs_by_date[dt_str] = round(float(obs["result"]), 6)
 
     _, dvrt_rows = get_dvrt_rows(
         station_id,
@@ -365,7 +344,7 @@ def calculate_diff_counts(station_id, start_date=None, end_date=None):
         elif v_hs is not None:
             missing_dvrt += 1
 
-    return mismatches, missing_hs, missing_dvrt, hs_duplicate_days_count
+    return mismatches, missing_hs, missing_dvrt
 
 
 def build_diff_report(station_id, start_date=None, end_date=None):
@@ -374,7 +353,6 @@ def build_diff_report(station_id, start_date=None, end_date=None):
     datastreams = get_daily_datastreams(station_id)
 
     hs_by_date = {}
-    hs_time_groups = {}
     if datastreams:
         latest_stream = max(
             datastreams,
@@ -388,10 +366,7 @@ def build_diff_report(station_id, start_date=None, end_date=None):
         for obs in observations:
             if "phenomenonTime" in obs and "result" in obs:
                 dt_str = datetime.fromisoformat(obs["phenomenonTime"].replace("Z", "+00:00")).date().isoformat()
-                hs_time_groups.setdefault(dt_str, []).append((obs["phenomenonTime"], round(float(obs["result"]), 6)))
-        
-        for d, items in hs_time_groups.items():
-            hs_by_date[d] = items[0][1]
+                hs_by_date[dt_str] = round(float(obs["result"]), 6)
 
     _, dvrt_rows = get_dvrt_rows(
         station_id,
@@ -407,7 +382,6 @@ def build_diff_report(station_id, start_date=None, end_date=None):
             dvrt_by_date[dt_str] = round(float(row["value"]), 6)
 
     all_dates = sorted(list(set(dvrt_by_date.keys()).union(set(hs_by_date.keys()))))
-    duplicate_days = {d: items for d, items in hs_time_groups.items() if len(items) > 1}
 
     output = io.StringIO()
     output.write(f"=== TIME SERIES DATA DIFF REPORT ===\n")
@@ -435,20 +409,8 @@ def build_diff_report(station_id, start_date=None, end_date=None):
     output.write(f"SUMMARY OF FINDINGS:\n")
     output.write(f" -> Value Mismatches: {len(mismatches)}\n")
     output.write(f" -> Missing in HydroServer: {len(missing_in_hs)}\n")
-    output.write(f" -> Missing in DVRT: {len(missing_in_dvrt)}\n")
-    output.write(f" -> HydroServer Duplicate Timestamp Days: {len(duplicate_days)}\n\n")
+    output.write(f" -> Missing in DVRT: {len(missing_in_dvrt)}\n\n")
     output.write(f"------------------------------------\n\n")
-
-    if duplicate_days:
-        output.write(f"HYDROSERVER DUPLICATE TIMESTAMPS DETAILS:\n")
-        output.write(f"{'Date':<12} | {'Raw Timestamp':<30} | {'Stored Value':<15}\n")
-        output.write(f"-" * 65 + "\n")
-        for d in sorted(duplicate_days.keys()):
-            for index, (ts, val) in enumerate(duplicate_days[d]):
-                label_date = d if index == 0 else ""
-                output.write(f"{label_date:<12} | {ts:<30} | {val:<15}\n")
-            output.write(f"-" * 65 + "\n")
-        output.write("\n")
 
     if mismatches:
         output.write(f"VALUE MISMATCH DETAILS:\n")
@@ -475,8 +437,8 @@ def build_diff_report(station_id, start_date=None, end_date=None):
             output.write(f"{d:<12} | {vh:<15}\n")
         output.write("\n")
 
-    if not mismatches and not missing_in_hs and not missing_in_dvrt and not duplicate_days:
-        output.write("SUCCESS: Datasets match perfectly. No differences or duplicates found.\n")
+    if not mismatches and not missing_in_hs and not missing_in_dvrt:
+        output.write("SUCCESS: Datasets match perfectly. No differences found.\n")
 
     return output.getvalue()
 
@@ -640,7 +602,7 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
     annotations = []
     dvrt_url = build_dvrt_plot_url(station_id)
     csv_url = build_csv_download_url(base_url, station_id, start_date, end_date)
-    diff_url = build_diff_inline_url(base_url, station_id, start_date, end_date)
+    diff_url = build_diff_download_url(base_url, station_id, start_date, end_date)
 
     button_y = 0.99
     current_x = 0.01
@@ -723,14 +685,14 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
             )
         )
 
+    # --- Fetch Diff Metrics & Build Summary Text Box on Plot ---
     try:
-        mismatches, missing_hs, missing_dvrt, hs_duplicates = calculate_diff_counts(station_id, start_date, end_date)
+        mismatches, missing_hs, missing_dvrt = calculate_diff_counts(station_id, start_date, end_date)
         summary_html = (
             "<b>Summary of Findings:</b><br>"
             f"• Value Mismatches: {mismatches}<br>"
             f"• Missing in HydroServer: {missing_hs}<br>"
-            f"• Missing in DVRT: {missing_dvrt}<br>"
-            f"• HS Duplicate Days: {hs_duplicates}"
+            f"• Missing in DVRT: {missing_dvrt}"
         )
         annotations.append(
             dict(
@@ -738,7 +700,7 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
                 xref="paper",
                 yref="paper",
                 x=0.01,
-                y=0.91,
+                y=0.91,  # Positioned safely underneath the button row
                 showarrow=False,
                 xanchor="left",
                 yanchor="top",
@@ -787,9 +749,6 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Check if this query is explicitly for a direct inline diff text render
-            is_diff_route = "/diff" in self.path
-
             station_id, start_date, end_date = resolve_options(self.path)
             parsed_path = urlparse(self.path).path
 
@@ -808,12 +767,16 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
-            if is_diff_route:
+            if parsed_path == "/diff.txt":
                 diff_text = build_diff_report(station_id, start_date, end_date)
                 body = diff_text.encode("utf-8")
+                filename = f"station_{station_id}_timeseries_diff.txt"
                 self.send_response(200)
-                # Content-Type text/plain instructs browser to cleanly render it inside the tab
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{filename}"',
+                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
