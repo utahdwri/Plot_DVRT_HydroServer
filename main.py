@@ -176,6 +176,12 @@ def build_csv_download_url(base_url, station_id, start_date=None, end_date=None)
     return f"{base_url.rstrip('/')}/download.csv?{build_plot_query(station_id, start_date, end_date)}"
 
 
+def build_diff_download_url(base_url, station_id, start_date=None, end_date=None):
+    if not base_url:
+        return None
+    return f"{base_url.rstrip('/')}/diff.txt?{build_plot_query(station_id, start_date, end_date)}"
+
+
 def get_nested_value(data, path):
     value = data
     for key in path:
@@ -191,7 +197,6 @@ def get_datastream_thing_id(datastream):
         datastream.get("thingId"),
         datastream.get("thing"),
         datastream.get("thingUid"),
-        datastream.get("thing_uid"),
         get_nested_value(datastream, ["thing", "id"]),
         get_nested_value(datastream, ["thing", "uid"]),
     )
@@ -284,6 +289,158 @@ def get_dvrt_rows(station_id, start_date=None, end_date=None, start_datetime=Non
         rows.append(row)
 
     return dvrt_json, rows
+
+
+def calculate_diff_counts(station_id, start_date=None, end_date=None):
+    """Calculates diff metrics efficiently to expose onto the plot summary string."""
+    start_datetime = start_of_day(start_date)
+    end_datetime = end_of_day(end_date)
+    datastreams = get_daily_datastreams(station_id)
+
+    hs_by_date = {}
+    if datastreams:
+        latest_stream = max(
+            datastreams,
+            key=lambda x: parse_hydroserver_datetime(x.get("phenomenonEndTime")),
+        )
+        observations = get_hydroserver_observations(
+            latest_stream["id"],
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+        )
+        for obs in observations:
+            if "phenomenonTime" in obs and "result" in obs:
+                dt_str = datetime.fromisoformat(obs["phenomenonTime"].replace("Z", "+00:00")).date().isoformat()
+                hs_by_date[dt_str] = round(float(obs["result"]), 6)
+
+    _, dvrt_rows = get_dvrt_rows(
+        station_id,
+        start_date=start_date,
+        end_date=end_date,
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+    )
+    dvrt_by_date = {}
+    for row in dvrt_rows:
+        if "date" in row and "value" in row:
+            dt_str = datetime.fromisoformat(row["date"]).date().isoformat()
+            dvrt_by_date[dt_str] = round(float(row["value"]), 6)
+
+    all_dates = set(dvrt_by_date.keys()).union(set(hs_by_date.keys()))
+
+    mismatches = 0
+    missing_hs = 0
+    missing_dvrt = 0
+
+    for d in all_dates:
+        v_dvrt = dvrt_by_date.get(d)
+        v_hs = hs_by_date.get(d)
+
+        if v_dvrt is not None and v_hs is not None:
+            if v_dvrt != v_hs:
+                mismatches += 1
+        elif v_dvrt is not None:
+            missing_hs += 1
+        elif v_hs is not None:
+            missing_dvrt += 1
+
+    return mismatches, missing_hs, missing_dvrt
+
+
+def build_diff_report(station_id, start_date=None, end_date=None):
+    start_datetime = start_of_day(start_date)
+    end_datetime = end_of_day(end_date)
+    datastreams = get_daily_datastreams(station_id)
+
+    hs_by_date = {}
+    if datastreams:
+        latest_stream = max(
+            datastreams,
+            key=lambda x: parse_hydroserver_datetime(x.get("phenomenonEndTime")),
+        )
+        observations = get_hydroserver_observations(
+            latest_stream["id"],
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+        )
+        for obs in observations:
+            if "phenomenonTime" in obs and "result" in obs:
+                dt_str = datetime.fromisoformat(obs["phenomenonTime"].replace("Z", "+00:00")).date().isoformat()
+                hs_by_date[dt_str] = round(float(obs["result"]), 6)
+
+    _, dvrt_rows = get_dvrt_rows(
+        station_id,
+        start_date=start_date,
+        end_date=end_date,
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+    )
+    dvrt_by_date = {}
+    for row in dvrt_rows:
+        if "date" in row and "value" in row:
+            dt_str = datetime.fromisoformat(row["date"]).date().isoformat()
+            dvrt_by_date[dt_str] = round(float(row["value"]), 6)
+
+    all_dates = sorted(list(set(dvrt_by_date.keys()).union(set(hs_by_date.keys()))))
+
+    output = io.StringIO()
+    output.write(f"=== TIME SERIES DATA DIFF REPORT ===\n")
+    output.write(f"Station ID: {station_id}\n")
+    output.write(f"Generated On: {datetime.now().isoformat()}\n")
+    output.write(f"Total Combined Dates: {len(all_dates)}\n")
+    output.write(f"------------------------------------\n\n")
+
+    mismatches = []
+    missing_in_hs = []
+    missing_in_dvrt = []
+
+    for d in all_dates:
+        v_dvrt = dvrt_by_date.get(d)
+        v_hs = hs_by_date.get(d)
+
+        if v_dvrt is not None and v_hs is not None:
+            if v_dvrt != v_hs:
+                mismatches.append((d, v_dvrt, v_hs))
+        elif v_dvrt is not None:
+            missing_in_hs.append((d, v_dvrt))
+        elif v_hs is not None:
+            missing_in_dvrt.append((d, v_hs))
+
+    output.write(f"SUMMARY OF FINDINGS:\n")
+    output.write(f" -> Value Mismatches: {len(mismatches)}\n")
+    output.write(f" -> Missing in HydroServer: {len(missing_in_hs)}\n")
+    output.write(f" -> Missing in DVRT: {len(missing_in_dvrt)}\n\n")
+    output.write(f"------------------------------------\n\n")
+
+    if mismatches:
+        output.write(f"VALUE MISMATCH DETAILS:\n")
+        output.write(f"{'Date':<12} | {'DVRT Value':<15} | {'HydroServer Value':<15} | {'Difference':<15}\n")
+        output.write(f"-" * 65 + "\n")
+        for d, vd, vh in mismatches:
+            diff = round(vd - vh, 6)
+            output.write(f"{d:<12} | {vd:<15} | {vh:<15} | {diff:<15}\n")
+        output.write("\n")
+
+    if missing_in_hs:
+        output.write(f"MISSING IN HYDROSERVER (Present in DVRT):\n")
+        output.write(f"{'Date':<12} | {'DVRT Value':<15}\n")
+        output.write(f"-" * 32 + "\n")
+        for d, vd in missing_in_hs:
+            output.write(f"{d:<12} | {vd:<15}\n")
+        output.write("\n")
+
+    if missing_in_dvrt:
+        output.write(f"MISSING IN DVRT (Present in HydroServer):\n")
+        output.write(f"{'Date':<12} | {'HydroServer Value':<15}\n")
+        output.write(f"-" * 32 + "\n")
+        for d, vh in missing_in_dvrt:
+            output.write(f"{d:<12} | {vh:<15}\n")
+        output.write("\n")
+
+    if not mismatches and not missing_in_hs and not missing_in_dvrt:
+        output.write("SUCCESS: Datasets match perfectly. No differences found.\n")
+
+    return output.getvalue()
 
 
 def build_csv_data(station_id, start_date=None, end_date=None):
@@ -441,20 +598,19 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
 
     station_name = dvrt_json.get("station_name", f"Station {station_id}")
     y_units = dvrt_json.get("units", "Value")
-    
-    # --- Reposition buttons onto the same row ---
+
     annotations = []
     dvrt_url = build_dvrt_plot_url(station_id)
     csv_url = build_csv_download_url(base_url, station_id, start_date, end_date)
-    
-    # We fix the Y coordinate to the very top row, and stagger along the X axis
-    button_y = 0.99 
+    diff_url = build_diff_download_url(base_url, station_id, start_date, end_date)
+
+    button_y = 0.99
     current_x = 0.01
 
     if hydroserver_url:
         annotations.append(
             dict(
-                text=f"<a href='{hydroserver_url}' target='_blank'>Open HydroServer</a>",
+                text=f"<a href='{hydroserver_url}' target='_blank'>HydroServer page</a>",
                 xref="paper",
                 yref="paper",
                 x=current_x,
@@ -469,11 +625,11 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
                 borderpad=4,
             )
         )
-        current_x += 0.22  # Shift right to leave room for the next button
+        current_x += 0.22
 
     annotations.append(
         dict(
-            text=f"<a href='{dvrt_url}' target='_blank'>Open DVRT</a>",
+            text=f"<a href='{dvrt_url}' target='_blank'>DVRT page</a>",
             xref="paper",
             yref="paper",
             x=current_x,
@@ -488,7 +644,7 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
             borderpad=4,
         )
     )
-    current_x += 0.16  # Shift right for the final button
+    current_x += 0.16
 
     if csv_url:
         annotations.append(
@@ -508,10 +664,59 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
                 borderpad=4,
             )
         )
+        current_x += 0.19
+
+    if diff_url:
+        annotations.append(
+            dict(
+                text=f"<a href='{diff_url}' target='_blank'>Diff</a>",
+                xref="paper",
+                yref="paper",
+                x=current_x,
+                y=button_y,
+                showarrow=False,
+                xanchor="left",
+                yanchor="top",
+                font=dict(size=26, color="darkorange"),
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="darkorange",
+                borderwidth=1,
+                borderpad=4,
+            )
+        )
+
+    # --- Fetch Diff Metrics & Build Summary Text Box on Plot ---
+    try:
+        mismatches, missing_hs, missing_dvrt = calculate_diff_counts(station_id, start_date, end_date)
+        summary_html = (
+            "<b>Summary of Findings:</b><br>"
+            f"• Value Mismatches: {mismatches}<br>"
+            f"• Missing in HydroServer: {missing_hs}<br>"
+            f"• Missing in DVRT: {missing_dvrt}"
+        )
+        annotations.append(
+            dict(
+                text=summary_html,
+                xref="paper",
+                yref="paper",
+                x=0.01,
+                y=0.91,  # Positioned safely underneath the button row
+                showarrow=False,
+                xanchor="left",
+                yanchor="top",
+                font=dict(size=20, color="#333333"),
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#cccccc",
+                borderwidth=1,
+                borderpad=8,
+            )
+        )
+    except Exception as e:
+        print(f"Could not print Summary of Findings on plot: {e}")
 
     fig.update_layout(
         title=dict(
-            text=f"Daily Time Series Comparison: {station_name}",
+            text=f"Daily Time Series Comparison ({station_id}): {station_name}",
             font=dict(size=34),
         ),
         xaxis_title="Date",
@@ -535,6 +740,7 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
     )
     return fig
 
+
 class PlotRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/favicon.ico":
@@ -545,6 +751,7 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
         try:
             station_id, start_date, end_date = resolve_options(self.path)
             parsed_path = urlparse(self.path).path
+
             if parsed_path == "/download.csv":
                 csv_text = build_csv_data(station_id, start_date, end_date)
                 body = csv_text.encode("utf-8")
@@ -560,11 +767,26 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
+            if parsed_path == "/diff.txt":
+                diff_text = build_diff_report(station_id, start_date, end_date)
+                body = diff_text.encode("utf-8")
+                filename = f"station_{station_id}_timeseries_diff.txt"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{filename}"',
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
             base_url = f"http://{self.headers.get('Host', f'{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}')}/"
             fig = build_figure(station_id, start_date, end_date, base_url=base_url)
             body = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
         except Exception as error:
-            self.send_text_response(500, f"Failed to build plot: {error}")
+            self.send_text_response(500, f"Failed to build response: {error}")
             return
 
         self.send_response(200)
@@ -583,10 +805,7 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
 
 
 def serve_plots(host=LOCAL_SERVER_HOST, port=LOCAL_SERVER_PORT):
-    # GCP Cloud Run injects the PORT environment variable dynamically.
     gcp_port = int(os.environ.get("PORT", port))
-    
-    # Cloud Run requires routing incoming public traffic through 0.0.0.0.
     gcp_host = "0.0.0.0" if os.environ.get("PORT") else host
 
     server = ThreadingHTTPServer((gcp_host, gcp_port), PlotRequestHandler)
@@ -614,8 +833,7 @@ if __name__ == "__main__":
             args.station_id,
         ]
     )
-    
-    # Force server mode automatically if running inside a cloud environment container ($PORT present)
+
     if os.environ.get("PORT") or args.serve or not has_direct_station_request:
         serve_plots(host=args.host, port=args.port)
     else:
