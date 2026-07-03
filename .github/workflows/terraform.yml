@@ -1,0 +1,59 @@
+name: Apply Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub environment to run Terraform against"
+        type: environment
+        required: true
+      action:
+        description: "Plan only, or plan and apply"
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_VAR_environment: ${{ inputs.environment }}
+      TF_VAR_gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_gcp_region: ${{ vars.GCP_REGION }}
+    steps:
+      - name: Checkout Deployment Repository
+        uses: actions/checkout@v4
+
+      - name: Configure GCP Credentials
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="impersonate_service_account=${{ vars.GCP_SERVICE_ACCOUNT }}" \
+            -backend-config="bucket=${{ vars.TERRAFORM_BUCKET }}" \
+            -backend-config="prefix=state/hydroserver_${{ inputs.environment }}"
+
+      - name: Terraform Plan
+        run: terraform plan -no-color -input=false -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply'
+        run: terraform apply -auto-approve -input=false tfplan
