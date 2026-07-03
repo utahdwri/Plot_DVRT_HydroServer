@@ -441,19 +441,24 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
 
     station_name = dvrt_json.get("station_name", f"Station {station_id}")
     y_units = dvrt_json.get("units", "Value")
+    
+    # --- Reposition buttons onto the same row ---
     annotations = []
     dvrt_url = build_dvrt_plot_url(station_id)
     csv_url = build_csv_download_url(base_url, station_id, start_date, end_date)
-    dvrt_link_y = 0.99
-    csv_link_y = 0.93
+    
+    # We fix the Y coordinate to the very top row, and stagger along the X axis
+    button_y = 0.99 
+    current_x = 0.01
+
     if hydroserver_url:
         annotations.append(
             dict(
                 text=f"<a href='{hydroserver_url}' target='_blank'>Open HydroServer</a>",
                 xref="paper",
                 yref="paper",
-                x=0.01,
-                y=0.99,
+                x=current_x,
+                y=button_y,
                 showarrow=False,
                 xanchor="left",
                 yanchor="top",
@@ -464,15 +469,15 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
                 borderpad=4,
             )
         )
-        dvrt_link_y = 0.93
-        csv_link_y = 0.87
+        current_x += 0.22  # Shift right to leave room for the next button
+
     annotations.append(
         dict(
             text=f"<a href='{dvrt_url}' target='_blank'>Open DVRT</a>",
             xref="paper",
             yref="paper",
-            x=0.01,
-            y=dvrt_link_y,
+            x=current_x,
+            y=button_y,
             showarrow=False,
             xanchor="left",
             yanchor="top",
@@ -483,14 +488,16 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
             borderpad=4,
         )
     )
+    current_x += 0.16  # Shift right for the final button
+
     if csv_url:
         annotations.append(
             dict(
                 text=f"<a href='{csv_url}' target='_blank'>Download CSV</a>",
                 xref="paper",
                 yref="paper",
-                x=0.01,
-                y=csv_link_y,
+                x=current_x,
+                y=button_y,
                 showarrow=False,
                 xanchor="left",
                 yanchor="top",
@@ -501,6 +508,7 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
                 borderpad=4,
             )
         )
+
     fig.update_layout(
         title=dict(
             text=f"Daily Time Series Comparison: {station_name}",
@@ -526,7 +534,6 @@ def build_figure(station_id, start_date=None, end_date=None, base_url=None):
         margin=dict(t=125),
     )
     return fig
-
 
 class PlotRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
