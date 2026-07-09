@@ -782,9 +782,9 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
-           base_url = f"http://{self.headers.get('Host', f'{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}')}/"
+            base_url = f"http://{self.headers.get('Host', f'{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}')}/"
             fig = build_figure(station_id, start_date, end_date, base_url=base_url)
-            body = fig.to_html(include_plotlyjs=True, full_html=True).encode("utf-8")
+            body = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
         except Exception as error:
             self.send_text_response(500, f"Failed to build response: {error}")
             return
