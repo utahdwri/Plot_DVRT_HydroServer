@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+from collections import Counter
 import json
 import re
 import time
@@ -361,6 +362,20 @@ def make_timeseries_dataframe(data, spacing_unit, source, datastream_name=None):
     return df
 
 
+
+
+def count_duplicate_dates(df):
+    """Return the number of extra HydroServer records that share the same date.
+
+    Example: if a date appears 3 times, it contributes 2 duplicate values.
+    """
+    if df.empty or "date" not in df.columns:
+        return 0
+
+    date_counts = Counter(df["date"].dropna().astype(str))
+    return int(sum(count - 1 for count in date_counts.values() if count > 1))
+
+
 def get_different_record_counts(first_df, second_df):
     compare_columns = ["date", "value"]
     empty_index = pd.MultiIndex.from_tuples([], names=compare_columns)
@@ -561,6 +576,9 @@ def compare_usbr_datastreams():
                     source="hydroserver",
                     datastream_name=datastream_name,
                 )
+                hydroserver_duplicate_values_count = count_duplicate_dates(
+                    hydroserver_df
+                )
 
                 different_record_count = count_different_records(
                     dvrt_df,
@@ -589,6 +607,9 @@ def compare_usbr_datastreams():
                         "dvrt_plot_link": dvrt_plot_link,
                         "dvrt_observation_count": len(dvrt_df),
                         "hydroserver_observation_count": len(hydroserver_df),
+                        "hydroserver_duplicate_values_count": (
+                            hydroserver_duplicate_values_count
+                        ),
                         "different_record_count": different_record_count,
                         "missing_value_count": difference_summary.get(
                             "missing_value_count"
@@ -616,7 +637,9 @@ def compare_usbr_datastreams():
                 print(
                     f"{station_id} | {datastream_uid} | "
                     f"spacing={spacing_unit} | "
-                    f"identical={identical}"
+                    f"identical={identical} | "
+                    f"hydroserver_duplicate_values_count="
+                    f"{hydroserver_duplicate_values_count}"
                 )
 
             except Exception as error:
@@ -637,6 +660,7 @@ def compare_usbr_datastreams():
                         "dvrt_plot_link": dvrt_plot_link,
                         "dvrt_observation_count": None,
                         "hydroserver_observation_count": None,
+                        "hydroserver_duplicate_values_count": None,
                         "different_record_count": None,
                         "missing_value_count": None,
                         "different_value_count": None,
