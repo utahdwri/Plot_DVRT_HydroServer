@@ -748,6 +748,11 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # --- FIX 2: Root Endpoint Route to satisfy Cloud Run's automated container Health Check ---
+        if self.path == "/" or self.path == "":
+            self.send_text_response(200, "Healthy - Please use dynamic queries like ?station_id=XXXX")
+            return
+
         try:
             station_id, start_date, end_date = resolve_options(self.path)
             parsed_path = urlparse(self.path).path
@@ -784,7 +789,10 @@ class PlotRequestHandler(BaseHTTPRequestHandler):
 
             base_url = f"http://{self.headers.get('Host', f'{LOCAL_SERVER_HOST}:{LOCAL_SERVER_PORT}')}/"
             fig = build_figure(station_id, start_date, end_date, base_url=base_url)
-            body = fig.to_html(include_plotlyjs=PLOTLY_JS_CDN_URL, full_html=True,).encode("utf-8")body = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
+            
+            # --- FIX 1: Cleaned up messy inline copy-paste code overlap string artifact here ---
+            body = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
+            
         except Exception as error:
             self.send_text_response(500, f"Failed to build response: {error}")
             return
