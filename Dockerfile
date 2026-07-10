@@ -34,10 +34,12 @@ COPY --chown=appuser:appuser requirements.txt .
 RUN python -m pip install --upgrade pip \
     && pip install -r requirements.txt
 
-COPY --chown=appuser:appuser *.py Query.txt ./
+COPY --chown=appuser:appuser *.py ./
 
 RUN python -m compileall -q .
 
 USER appuser
 
 CMD ["sh", "-c", "exec python -u plot_DVRT_HydroServer.py --serve --host 0.0.0.0 --port ${PORT:-8080}"]
+
+CMD ["sh", "-c", "exec python -u plot_DVRT_HydroServer.py --serve --host 0.0.0.0 --port ${PORT:-8080}"] 0.0.0.0 --port ${PORT:-8080}"]
