@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 from datetime import datetime
 import json
@@ -10,33 +11,12 @@ from hydroserverpy import HydroServer
 
 from hydroserver_dataframe_utils import hydro_list_to_flat_df
 
+# --- Configuration Constants ---
 HS_HOST = "https://hydroserver.waterrights.utah.gov/"
-# HS_HOST = "https://hydroservertest.waterrights.utah.gov/"
-
-# WORKSPACE_NAME = "CU_SCADA-final"
 WORKSPACE_NAME = "Prod Measurement Data - Final"
 WORKSPACE_ID = "019eb774-8b9d-74fe-b6be-b33ab48cfabe"
 
 TARGET_COLLECTION_SYS_NAME = ["BEAR_UPL"]
-# TARGET_COLLECTION_SYS_NAME = ["CU_SCADA"]
-
-# TARGET_COLLECTION_SYS_NAME = ["USBR"]
-
-# TARGET_COLLECTION_SYS_NAME = [
-# "DUCHESNE",
-# "EMERY",
-# "STRAWBERRY",
-# "SEVIER",
-# "UINTAH",
-# "CICWCD"]
-
-
-# TARGET_COLLECTION_SYS_NAME = [
-#     "SEVIER_METRIDYNE",
-#     "BEAR_UPPER",
-#     "EAST_FORK_VIRGIN",
-#     "ROCKY_FORD",
-# ]
 
 OBSERVATION_PAGE_SIZE = 15000
 API_BATCH_SIZE = 10
@@ -75,6 +55,17 @@ def workspace_file_slug(workspace_name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", workspace_name.lower()).strip("_") or "workspace"
 
 
+def clean_station_id(station_id) -> str:
+    """Safely coerces float-like station IDs (e.g. 4884.0) or string IDs to clean string integers."""
+    if pd.isna(station_id):
+        return ""
+    try:
+        return str(int(float(station_id)))
+    except (ValueError, TypeError):
+        return str(station_id).split(".")[0].strip()
+
+
+# --- Dynamic Slugs & Outputs ---
 WORKSPACE_FILE_SLUG = workspace_file_slug(WORKSPACE_NAME)
 EXPORT_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_PATH = Path(__file__).with_name(
@@ -85,62 +76,6 @@ COMPARE_OUTPUT_PATH = Path(__file__).with_name(
 )
 
 
-# Connect to HydroServer using public read access.
-hs_api = HydroServer(host=HS_HOST)
-
-
-# Get all Things and Datastreams in the workspace.
-df_things = hydro_list_to_flat_df(
-    hs_api.things.list,
-    workspace=WORKSPACE_ID,
-)
-
-df_datastreams = hydro_list_to_flat_df(
-    hs_api.datastreams.list,
-    workspace=WORKSPACE_ID,
-)
-
-
-# Join Datastreams to their parent Things.
-df_things = df_things.add_prefix("thing_")
-df_datastreams = df_datastreams.add_prefix("datastream_")
-
-things_datastreams_df = pd.merge(
-    df_things,
-    df_datastreams,
-    how="left",
-    left_on="thing_uid",
-    right_on="datastream_thing_id",
-)
-
-target_collection_sys_names = normalize_target_collection_sys_names(
-    TARGET_COLLECTION_SYS_NAME
-)
-if target_collection_sys_names_include_all(TARGET_COLLECTION_SYS_NAME):
-    print("No thing_collection_sys_name filtering applied; using ALL collections.")
-else:
-    things_datastreams_df = things_datastreams_df[
-        things_datastreams_df["thing_collection_sys_name"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .isin(target_collection_sys_names)
-    ].copy()
-    print(
-        "Filtered datastreams to "
-        f"thing_collection_sys_name={target_collection_sys_names}."
-    )
-
-
-# Save the dataframe so it can be opened or reused later.
-try:
-    things_datastreams_df.to_csv(OUTPUT_PATH, index=False)
-    saved_main_csv = True
-except PermissionError:
-    print(f"Could not save {OUTPUT_PATH}. Close the file if it is open.")
-    saved_main_csv = False
-
-
 def normalize_spacing_unit(spacing_unit):
     if pd.isna(spacing_unit):
         return ""
@@ -148,35 +83,35 @@ def normalize_spacing_unit(spacing_unit):
 
 
 def get_dvrt_url(station_id, spacing_unit):
-    station_id = str(station_id).split(".")[0]
+    station_id_str = clean_station_id(station_id)
     spacing = normalize_spacing_unit(spacing_unit)
 
     if spacing == "days":
-        return f"{DVRT_DAILY_CHART_URL}?station_id={station_id}&f=json"
+        return f"{DVRT_DAILY_CHART_URL}?station_id={station_id_str}&f=json"
 
     if spacing in ["hours", "minutes"]:
-        return f"{DVRT_REALTIME_CHART_URL}?station_id={station_id}&f=json-all"
+        return f"{DVRT_REALTIME_CHART_URL}?station_id={station_id_str}&f=json-all"
 
     raise ValueError(f"Unsupported intended_time_spacing_unit={spacing_unit!r}")
 
 
 def get_dvrt_plot_url(station_id, spacing_unit):
-    station_id = str(station_id).split(".")[0]
+    station_id_str = clean_station_id(station_id)
     spacing = normalize_spacing_unit(spacing_unit)
 
     if spacing == "days":
-        return f"{DVRT_DAILY_CHART_URL}?STATION_ID={station_id}"
+        return f"{DVRT_DAILY_CHART_URL}?STATION_ID={station_id_str}"
 
     if spacing in ["hours", "minutes"]:
-        return f"{DVRT_REALTIME_CHART_URL}?STATION_ID={station_id}"
+        return f"{DVRT_REALTIME_CHART_URL}?STATION_ID={station_id_str}"
 
     return ""
 
 
 def get_local_comparison_plot_url(station_id):
-    station_id = str(station_id).split(".")[0]
+    station_id_str = clean_station_id(station_id)
     return (
-        f"{LOCAL_COMPARISON_PLOT_URL}?station_id={station_id}"
+        f"{LOCAL_COMPARISON_PLOT_URL}?station_id={station_id_str}"
         f"&start_date={LOCAL_COMPARISON_START_DATE}"
     )
 
@@ -227,6 +162,9 @@ def normalize_datetime_column(series, spacing_unit, source):
         return parsed.dt.strftime("%Y-%m-%d")
 
     if source == "dvrt":
+        # Ensure series is completely naive before applying dynamic localization
+        if parsed.dt.tz is not None:
+            parsed = parsed.dt.tz_localize(None)
         parsed = parsed.dt.tz_localize(
             "America/Denver",
             ambiguous=False,
@@ -240,18 +178,9 @@ def normalize_datetime_column(series, spacing_unit, source):
 
 def choose_value_column(df, datastream_name=None):
     excluded_columns = {
-        "date",
-        "datetime",
-        "phenomenontime",
-        "phenomenon_time",
-        "time",
-        "timestamp",
-        "station_id",
-        "stationid",
-        "id",
-        "year",
-        "month",
-        "day",
+        "date", "datetime", "phenomenontime", "phenomenon_time", 
+        "time", "timestamp", "station_id", "stationid", "id", 
+        "year", "month", "day"
     }
     name = "" if pd.isna(datastream_name) else str(datastream_name).strip().lower()
     columns_by_normalized_name = {
@@ -278,19 +207,9 @@ def choose_value_column(df, datastream_name=None):
                     return original_column
 
     preferred_columns = [
-        "value",
-        "result",
-        "resultvalue",
-        "result_value",
-        "measurement",
-        "gageheight",
-        "gage_height",
-        "elevation",
-        "stage",
-        "discharge",
-        "flow",
-        "rv",
-        "rv_01",
+        "value", "result", "resultvalue", "result_value", "measurement",
+        "gageheight", "gage_height", "elevation", "stage", "discharge", 
+        "flow", "rv", "rv_01"
     ]
     for preferred_column in preferred_columns:
         if preferred_column in columns_by_normalized_name:
@@ -304,6 +223,7 @@ def choose_value_column(df, datastream_name=None):
         if numeric_values.notna().any():
             return column
 
+    print(f"Warning: Default fallback column matching selection triggered for: {datastream_name}")
     return df.columns[1] if len(df.columns) > 1 else df.columns[0]
 
 
@@ -335,12 +255,8 @@ def make_timeseries_dataframe(data, spacing_unit, source, datastream_name=None):
     for column in df.columns:
         lower_column = str(column).lower()
         if date_column is None and lower_column in [
-            "date",
-            "datetime",
-            "phenomenontime",
-            "phenomenon_time",
-            "time",
-            "timestamp",
+            "date", "datetime", "phenomenontime", "phenomenon_time", 
+            "time", "timestamp"
         ]:
             date_column = column
         if value_column is None:
@@ -443,12 +359,8 @@ def get_record_difference_summary(first_df, second_df):
     return {
         "missing_value_count": missing_value_count,
         "different_value_count": different_value_count,
-        "missing_value_dates": ", ".join(missing_value_dates)
-        if 0 < missing_value_count < 10
-        else "",
-        "different_value_dates": ", ".join(different_value_dates)
-        if 0 < different_value_count < 10
-        else "",
+        "missing_value_dates": ", ".join(missing_value_dates) if 0 < missing_value_count < 10 else "",
+        "different_value_dates": ", ".join(different_value_dates) if 0 < different_value_count < 10 else "",
     }
 
 
@@ -487,7 +399,7 @@ def save_comparison_rows(comparison_rows):
     return comparison_df
 
 
-def compare_usbr_datastreams():
+def compare_usbr_datastreams(things_datastreams_df, hs_api):
     comparison_rows = []
     target_collection_sys_names = normalize_target_collection_sys_names(
         TARGET_COLLECTION_SYS_NAME
@@ -504,10 +416,7 @@ def compare_usbr_datastreams():
         ]
 
     if usbr_rows.empty:
-        print(
-            "No datastreams matched "
-            f"thing_collection_sys_name={TARGET_COLLECTION_SYS_NAME}."
-        )
+        print(f"No datastreams matched thing_collection_sys_name={TARGET_COLLECTION_SYS_NAME}.")
 
     rows_to_compare = [
         row
@@ -525,14 +434,11 @@ def compare_usbr_datastreams():
         iter_batches(rows_to_compare, API_BATCH_SIZE),
         start=1,
     ):
-        print(
-            f"Processing API batch {batch_number}/{total_batches} "
-            f"({len(batch_rows)} datastreams)"
-        )
+        print(f"Processing API batch {batch_number}/{total_batches} ({len(batch_rows)} datastreams)")
 
         for row in batch_rows:
             station_id = row["datastream_STATION_ID"]
-            normalized_station_id = str(station_id).split(".")[0]
+            normalized_station_id = clean_station_id(station_id)
             collection_sys_name = row["thing_collection_sys_name"]
             thing_uid = row["thing_uid"]
             thing_name = row["thing_name"]
@@ -590,34 +496,17 @@ def compare_usbr_datastreams():
                         "dvrt_observation_count": len(dvrt_df),
                         "hydroserver_observation_count": len(hydroserver_df),
                         "different_record_count": different_record_count,
-                        "missing_value_count": difference_summary.get(
-                            "missing_value_count"
-                        ),
-                        "different_value_count": difference_summary.get(
-                            "different_value_count"
-                        ),
-                        "different_record_dates": get_different_record_dates(
-                            dvrt_df,
-                            hydroserver_df,
-                        ),
-                        "missing_value_dates": difference_summary.get(
-                            "missing_value_dates",
-                            "",
-                        ),
-                        "different_value_dates": difference_summary.get(
-                            "different_value_dates",
-                            "",
-                        ),
+                        "missing_value_count": difference_summary.get("missing_value_count"),
+                        "different_value_count": difference_summary.get("different_value_count"),
+                        "different_record_dates": get_different_record_dates(dvrt_df, hydroserver_df),
+                        "missing_value_dates": difference_summary.get("missing_value_dates", ""),
+                        "different_value_dates": difference_summary.get("different_value_dates", ""),
                         "identical": identical,
                         "error": "",
                     }
                 )
 
-                print(
-                    f"{station_id} | {datastream_uid} | "
-                    f"spacing={spacing_unit} | "
-                    f"identical={identical}"
-                )
+                print(f"{normalized_station_id} | {datastream_uid} | spacing={spacing_unit} | identical={identical}")
 
             except Exception as error:
                 comparison_rows.append(
@@ -647,7 +536,7 @@ def compare_usbr_datastreams():
                         "error": str(error),
                     }
                 )
-                print(f"{station_id} | {datastream_uid} | ERROR: {error}")
+                print(f"{normalized_station_id} | {datastream_uid} | ERROR: {error}")
 
         try:
             save_comparison_rows(comparison_rows)
@@ -661,18 +550,65 @@ def compare_usbr_datastreams():
 
     try:
         comparison_df = save_comparison_rows(comparison_rows)
-        print(f"Saved comparison results to: {COMPARE_OUTPUT_PATH}")
+        print(f"Saved final comparison results to: {COMPARE_OUTPUT_PATH}")
     except PermissionError:
         print(f"Could not save {COMPARE_OUTPUT_PATH}. Close the file if it is open.")
 
     return comparison_df
 
-print(f"Workspace: {WORKSPACE_NAME}")
-print(f"Workspace ID: {WORKSPACE_ID}")
-print(f"Things: {len(df_things)}")
-print(f"Datastreams: {len(df_datastreams)}")
-print(f"Rows in final dataframe: {len(things_datastreams_df)}")
-if saved_main_csv:
-    print(f"Saved to: {OUTPUT_PATH}")
 
-comparison_df = compare_usbr_datastreams()
+# --- Protected Script Entry Execution Pipeline ---
+if __name__ == "__main__":
+    # Connect to HydroServer using public read access.
+    hs_api = HydroServer(host=HS_HOST)
+
+    # Fetch Workspace Objects
+    print(f"Connecting to Workspace ID: {WORKSPACE_ID}...")
+    df_things = hydro_list_to_flat_df(hs_api.things.list, workspace=WORKSPACE_ID)
+    df_datastreams = hydro_list_to_flat_df(hs_api.datastreams.list, workspace=WORKSPACE_ID)
+
+    # Join Datastreams to parent Things safely
+    df_things = df_things.add_prefix("thing_")
+    df_datastreams = df_datastreams.add_prefix("datastream_")
+
+    things_datastreams_df = pd.merge(
+        df_things,
+        df_datastreams,
+        how="left",
+        left_on="thing_uid",
+        right_on="datastream_thing_id",
+    )
+
+    target_collection_sys_names = normalize_target_collection_sys_names(TARGET_COLLECTION_SYS_NAME)
+    if target_collection_sys_names_include_all(TARGET_COLLECTION_SYS_NAME):
+        print("No thing_collection_sys_name filtering applied; using ALL collections.")
+    else:
+        things_datastreams_df = things_datastreams_df[
+            things_datastreams_df["thing_collection_sys_name"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .isin(target_collection_sys_names)
+        ].copy()
+        print(f"Filtered datastreams to thing_collection_sys_name={target_collection_sys_names}.")
+
+    # Save mapping file setup configuration metadata
+    saved_main_csv = False
+    try:
+        things_datastreams_df.to_csv(OUTPUT_PATH, index=False)
+        saved_main_csv = True
+    except PermissionError:
+        print(f"Could not save {OUTPUT_PATH}. Close the file if it is open.")
+
+    print(f"\n--- Workspace Analysis Summary ---")
+    print(f"Workspace Name: {WORKSPACE_NAME}")
+    print(f"Workspace ID  : {WORKSPACE_ID}")
+    print(f"Total Things  : {len(df_things)}")
+    print(f"Datastreams   : {len(df_datastreams)}")
+    print(f"Merged Targets: {len(things_datastreams_df)}")
+    if saved_main_csv:
+        print(f"Mapping Matrix Saved To: {OUTPUT_PATH}")
+    print(f"-----------------------------------\n")
+
+    # Execute Time Series Comparative Sweeps
+    comparison_df = compare_usbr_datastreams(things_datastreams_df, hs_api)
